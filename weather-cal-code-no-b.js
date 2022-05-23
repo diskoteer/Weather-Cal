@@ -8,6 +8,7 @@ This script contains the logic that allows Weather Cal to work. Please do not mo
 Documentation is available at github.com/mzeryck/Weather-Cal
 
 */
+// log(Script.name())
 
 const weatherCal = {
 
@@ -228,18 +229,18 @@ const weatherCal = {
 
     } else if (backgroundType == 3) {
       background.type = "image"
-
-      const directoryPath = this.fm.joinPath(this.fm.documentsDirectory(), "Weather Cal")
+/*      const directoryPath = this.fm.joinPath(this.fm.documentsDirectory(), "Weather Cal")
       if (!this.fm.fileExists(directoryPath) || !this.fm.isDirectory(directoryPath)) { this.fm.createDirectory(directoryPath) }
       
       this.fm.writeImage(this.fm.joinPath(directoryPath, this.name + ".jpg"), await Photos.fromLibrary())
       
       background.dark = !(await this.generateAlert("Would you like to use a different image in dark mode?",["Yes","No"]))
       if (background.dark) this.fm.writeImage(this.fm.joinPath(directoryPath, this.name + " (Dark).jpg"), await Photos.fromLibrary())
+*/
     }
-
     this.writePreference(null, background, this.bgPath)
     return this.previewValue() 
+
   },
 
   // Load or reload a table full of preferences.
@@ -565,6 +566,10 @@ const weatherCal = {
       this.widget.backgroundGradient = gradient
 
     } else if (background.type == "image") {
+      const RESET_BACKGROUND = !config.runsInWidget
+      const { transparent } = importModule('no-background')
+      this.widget.backgroundImage = await transparent(Script.name(), RESET_BACKGROUND)
+      /*
       const extension = (this.darkMode && background.dark && !this.settings.widget.instantDark ? " (Dark)" : "") + ".jpg"
       const imagePath = this.fm.joinPath(this.fm.joinPath(this.fm.documentsDirectory(), "Weather Cal"), name + extension)
 
@@ -578,6 +583,7 @@ const weatherCal = {
       } else {
         this.generateAlert("Please choose a background image in the settings menu.")
       }
+      */
     }
 
     // Construct the widget.
