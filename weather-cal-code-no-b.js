@@ -8,7 +8,6 @@ This script contains the logic that allows Weather Cal to work. Please do not mo
 Documentation is available at github.com/mzeryck/Weather-Cal
 
 */
-// log(Script.name())
 
 const weatherCal = {
 
@@ -189,19 +188,47 @@ const weatherCal = {
     const returnVal = await this.promptForText("Paste your API key in the box below.",[""],["82c29fdbgd6aebbb595d402f8a65fabf"])
     const apiKey = returnVal.textFieldValue(0)
     if (!apiKey || apiKey == "" || apiKey == null) { return await this.generateAlert("No API key was entered. Try copying the key again and re-running this script.",["Exit"]) }
-
     this.writePreference("weather-cal-api-key", apiKey)
-    const req = new Request("https://api.openweathermap.org/data/2.5/onecall?lat=37.332280&lon=-122.010980&appid=" + apiKey)
-    try { val = await req.loadJSON() } catch { val = { current: false } }
-
-    if (!val.current) {
-      const message = firstRun ? "New OpenWeather API keys may take a few hours to activate. Your widget will start displaying weather information once it's active." : "The key you entered, " + apiKey + ", didn't work. If it's a new key, it may take a few hours to activate."
-      await this.generateAlert(message,[firstRun ? "Continue" : "OK"])
-
-    } else if (val.current && !firstRun) {
-      await this.generateAlert("The new key worked and was saved.")
+    
+    const apiResponse = await this.getWeatherApiPath(apiKey)
+    if (apiResponse && apiResponse.current) { 
+      await this.generateAlert("The API key worked and was saved.",[firstRun ? "Continue" : "OK"]) 
+    } else if (firstRun) {
+      await this.generateAlert("New OpenWeather API keys may take a few hours to activate. Your widget will start displaying weather information once it's active.",["Continue"]) 
+    } else {
+      return await this.generateAlert("The key you entered, " + apiKey + ", didn't work. If it's a new key, it may take a few hours to activate.")
     }
     return true
+  },
+  
+  // Get the API path, or the test response if a new API key is provided.
+  async getWeatherApiPath(newApiKey) {
+    const apiParameter = "?appid=" + (newApiKey || this.fm.readString(this.fm.joinPath(this.fm.libraryDirectory(), "weather-cal-api-key")).replace(/\"/g,""))
+    const apiPathPreference = this.fm.joinPath(this.fm.libraryDirectory(), "weather-cal-api-path")
+    if (!newApiKey && this.fm.fileExists(apiPathPreference)) {
+      return this.fm.readString(apiPathPreference).replace(/\"/g,"") + apiParameter
+    }
+    
+    async function checkApiKey(path) {
+      const req = new Request(path + apiParameter + "&lat=37.332280&lon=-122.010980")
+      let response
+      try { response = await req.loadJSON() } catch { }
+      return response
+    }
+
+    let apiPath = "https://api.openweathermap.org/data/3.0/onecall"
+    let apiResponse = await checkApiKey(apiPath)
+    
+    if (apiResponse && apiResponse.cod) { 
+      apiPath = "https://api.openweathermap.org/data/2.5/onecall" 
+      apiResponse = await checkApiKey(apiPath)
+    }
+    
+    if (apiResponse && !apiResponse.cod) {
+      this.writePreference("weather-cal-api-path", apiPath)
+    }
+    
+    return newApiKey ? apiResponse : apiPath + apiParameter
   },
 
   // Set the background of the widget.
@@ -762,7 +789,8 @@ const weatherCal = {
       if (event.title.startsWith("Canceled:")) { return false }
       if (event.isAllDay) { return eventSettings.showAllDay }
 
-      const minutesAfter = parseInt(eventSettings.minutesAfter) * 60000 || 0
+      // If they leave it blank, set minutes after to the duration of the event
+      const minutesAfter = parseInt(eventSettings.minutesAfter) >= 0 ? parseInt(eventSettings.minutesAfter) * 60000 : event.endDate - event.startDate
       return (event.startDate.getTime() + minutesAfter > this.now.getTime())
 
     }).slice(0,parseInt(eventSettings.numberOfEvents))
@@ -852,28 +880,38 @@ const weatherCal = {
   // Set up the sun data object.
   async setupSunrise() {
     if (!this.data.location) { await this.setupLocation() }
-    const location = this.data.location
-    async function getSunData(date) { return await new Request("https://api.sunrise-sunset.org/json?lat=" + location.latitude + "&lng=" + location.longitude + "&formatted=0&date=" + date.getFullYear() + "-" + (date.getMonth()+1) + "-" + date.getDate()).loadJSON() }
+	
+	const sunPath = this.fm.joinPath(this.fm.libraryDirectory(), "weather-cal-cache")
+	let sunData = this.getCache(sunPath, 60, 1440)
+	
+	const forcedLocale = this.settings.weather.locale || ""
+	let locale = forcedLocale.length ? forcedLocale : this.locale
+	
+	const safeLocales = this.getOpenWeatherLocaleCodes()
+	if (!forcedLocale.length && !safeLocales.includes(locale)) {
+		const languages = [locale, ...locale.split("_"), ...locale.split("-"), Device.locale(), ...Device.locale().split("_"), ...Device.locale().split("-")]
+		for (item of languages) {
+			if (safeLocales.includes(item)) {
+				locale = item
+				break
+			}
+		}
+	}
+	
+	if (!sunData || sunData.cacheExpired) {
+		try {
+			const apiPath = await this.getWeatherApiPath()
+			const sunReq = apiPath + "&lat=" + this.data.location.latitude + "&lon=" + this.data.location.longitude + "&exclude=minutely,alerts&units=" + this.settings.widget.units + "&lang=" + locale
+			sunData = await new Request(sunReq).loadJSON()
+			if (sunData.cod) { sunData = null }
+			if (sunData) { this.fm.writeString(sunPath, JSON.stringify(sunData)) }
+		} catch {}
+	}
 
-    const sunPath = this.fm.joinPath(this.fm.libraryDirectory(), "weather-cal-sunrise")
-    let sunData = this.getCache(sunPath, 60, 1440)
-
-    if (!sunData || sunData.cacheExpired || !sunData.results || sunData.results.length == 0) { 
-      try {
-        sunData = await getSunData(this.now)
-
-        const tomorrowDate = new Date()
-        tomorrowDate.setDate(this.now.getDate() + 1)
-        const tomorrowData = await getSunData(tomorrowDate)
-        sunData.results.tomorrow = tomorrowData.results.sunrise
-
-        this.fm.writeString(sunPath, JSON.stringify(sunData))
-      } catch {}
-    }
     this.data.sun = {}
-    this.data.sun.sunrise = sunData ? new Date(sunData.results.sunrise).getTime() : null
-    this.data.sun.sunset = sunData ? new Date(sunData.results.sunset).getTime() : null
-    this.data.sun.tomorrow = sunData ? new Date(sunData.results.tomorrow).getTime() : null
+    this.data.sun.sunrise = sunData ? sunData.daily[0].sunrise*1000 : null
+    this.data.sun.sunset = sunData ? sunData.daily[0].sunset*1000 : null
+    this.data.sun.tomorrow = sunData ? sunData.daily[1].sunrise*1000 : null
   },
 
   // Set up the weather data object.
@@ -899,8 +937,8 @@ const weatherCal = {
 
     if (!weatherData || weatherData.cacheExpired) {
       try {
-        const apiKey = this.fm.readString(this.fm.joinPath(this.fm.libraryDirectory(), "weather-cal-api-key")).replace(/\"/g,"")
-        const weatherReq = "https://api.openweathermap.org/data/2.5/onecall?lat=" + this.data.location.latitude + "&lon=" + this.data.location.longitude + "&exclude=minutely,alerts&units=" + this.settings.widget.units + "&lang=" + locale + "&appid=" + apiKey
+        const apiPath = await this.getWeatherApiPath()
+        const weatherReq = apiPath + "&lat=" + this.data.location.latitude + "&lon=" + this.data.location.longitude + "&exclude=minutely,alerts&units=" + this.settings.widget.units + "&lang=" + locale
         weatherData = await new Request(weatherReq).loadJSON()
         if (weatherData.cod) { weatherData = null }
         if (weatherData) { this.fm.writeString(weatherPath, JSON.stringify(weatherData)) }
@@ -1005,17 +1043,22 @@ const weatherCal = {
   async date(column) {
     const dateSettings = this.settings.date
     if (!this.data.events && dateSettings.dynamicDateSize) { await this.setupEvents() }
+	
+	const secondsForToday = Math.floor(new Date().getTime() / 1000) - 978307200
+	const defaultUrl = "calshow:" + secondsForToday
+	const settingUrl = dateSettings.url || ""
+	if (settingUrl.trim() != "none") { dateSettings.url = (settingUrl.length > 0) ? settingUrl : defaultUrl }
 
     if (dateSettings.dynamicDateSize ? this.data.events.length : dateSettings.staticDateSize == "small") {
-      this.provideText(this.formatDate(this.now,dateSettings.smallDateFormat), column, this.format.smallDate, true)
+      this.provideText(this.formatDate(this.now,dateSettings.smallDateFormat), column, this.format.smallDate, true, dateSettings.url)
 
     } else {
       const dateOneStack = this.align(column)
-      const dateOne = this.provideText(this.formatDate(this.now,dateSettings.largeDateLineOne), dateOneStack, this.format.largeDate1)
+      const dateOne = this.provideText(this.formatDate(this.now,dateSettings.largeDateLineOne), dateOneStack, this.format.largeDate1, false, dateSettings.url)
       dateOneStack.setPadding(this.padding/2, this.padding, 0, this.padding)
 
       const dateTwoStack = this.align(column)
-      const dateTwo = this.provideText(this.formatDate(this.now,dateSettings.largeDateLineTwo), dateTwoStack, this.format.largeDate2)
+      const dateTwo = this.provideText(this.formatDate(this.now,dateSettings.largeDateLineTwo), dateTwoStack, this.format.largeDate2, false, dateSettings.url)
       dateTwoStack.setPadding(0, this.padding, this.padding, this.padding)
     }
   },
@@ -1039,15 +1082,16 @@ const weatherCal = {
     if (!this.data.events) { await this.setupEvents() }
     const eventSettings = this.settings.events
 
+    const settingUrlExists = (eventSettings.url || "").length > 0
     if (this.data.events.length == 0) { 
-      if (eventSettings.noEventBehavior == "message" && this.localization.noEventMessage.length) { return this.provideText(this.localization.noEventMessage, column, this.format.noEvents, true) }
+      const secondsForToday = Math.floor(new Date().getTime() / 1000) - 978307200
+      if (eventSettings.noEventBehavior == "message" && this.localization.noEventMessage.length) { return this.provideText(this.localization.noEventMessage, column, this.format.noEvents, true, settingUrlExists ? eventSettings.url : "calshow:" + secondsForToday) }
       if (this[eventSettings.noEventBehavior]) { return await this[eventSettings.noEventBehavior](column) }
     }
 
     let currentStack
     let currentDiff = 0
     const numberOfEvents = this.data.events.length
-    const settingUrlExists = (eventSettings.url || "").length > 0
     const showCalendarColor = eventSettings.showCalendarColor
     const colorShape = showCalendarColor.includes("circle") ? "circle" : "rectangle"
     
@@ -1172,7 +1216,7 @@ const weatherCal = {
         colorItem.textColor = reminder.calendar.color
       }
 
-      if (reminder.isOverdue) { title.textColor = Color.red() }
+      if (reminder.isOverdue) { title.textColor = new Color(reminderSettings.overdueColor || "ff3b30") }
       if (reminder.isOverdue || !reminder.dueDate) { continue }
 
       let timeText
@@ -1214,7 +1258,7 @@ const weatherCal = {
     currentWeatherStack.layoutVertically()
     currentWeatherStack.setPadding(0, 0, 0, 0)
 
-    const defaultUrl = "https://weather.com/" + this.locale + "/weather/today/l/" + locationData.latitude + "," + locationData.longitude
+    const defaultUrl = "weather://"
     const settingUrl = weatherSettings.urlCurrent || ""
     if (settingUrl.trim() != "none") { currentWeatherStack.url = (settingUrl.length > 0) ? settingUrl : defaultUrl }
     
@@ -1282,7 +1326,7 @@ const weatherCal = {
 
     const showNextHour = (this.now.getHours() < parseInt(weatherSettings.tomorrowShownAtHour))
 
-    const defaultUrl = "https://weather.com/" + this.locale + "/weather/" + (showNextHour ? "today" : "tenday") +"/l/" + locationData.latitude + "," + locationData.longitude
+    const defaultUrl = "weather://"
     const settingUrl = showNextHour ? (weatherSettings.urlFuture || "") : (weatherSettings.urlForecast || "")
     if (settingUrl != "none") { futureWeatherStack.url = (settingUrl.length > 0) ? settingUrl : defaultUrl }
 
@@ -1344,7 +1388,7 @@ const weatherCal = {
 
     // Set up the container stack and overall spacing.
     const weatherStack = this.align(column)
-    const defaultUrl = "https://weather.com/" + this.locale + "/weather/" + (hourly ? "today" : "tenday") + "/l/" + locationData.latitude + "," + locationData.longitude
+    const defaultUrl = "weather://"
     const settingUrl = hourly ? (weatherSettings.urlFuture || "") : (weatherSettings.urlForecast || "")
     weatherStack.url = (settingUrl.length > 0) ? settingUrl : defaultUrl
     
@@ -1648,6 +1692,7 @@ const weatherCal = {
   // Gets the cache.
   getCache(path, minAge = -1, maxAge) {
     if (!this.fm.fileExists(path)) return null
+    if (!this.fm.readString(path)) return null
     const cache = JSON.parse(this.fm.readString(path))
     const age = (this.now.getTime() - this.fm.modificationDate(path).getTime())/60000
     
@@ -1784,7 +1829,7 @@ const weatherCal = {
   },
 
   // Add formatted text to a container.
-  provideText(string, stack, format, standardize = false) {
+  provideText(string, stack, format, standardize = false, url) {
     let container = stack
     if (standardize) {
       container = this.align(stack)
@@ -1815,6 +1860,9 @@ const weatherCal = {
     const textSize = (format && format.size && parseInt(format.size)) ? format.size : this.format.defaultText.size
     textItem.font = this.provideFont(textFont, parseInt(textSize))
     textItem.textColor = this.provideColor(format)
+	if (url) {
+		textItem.url = url
+	}
 
     return textItem
   },
@@ -2136,7 +2184,12 @@ const weatherCal = {
         largeDateLineTwo: {
           val: "MMMM d",
           name: "Large date format, line 2",
-        }, 
+        },
+        url: {
+			val: "",
+			name: "URL to open when tapped",
+			description: "Optionally provide a URL to open when this item is tapped. Leave blank to open the built-in Calendar app.",
+		},		
       },
       events: {
         name: "Events",
@@ -2147,7 +2200,7 @@ const weatherCal = {
         minutesAfter: {
           val: "5",
           name: "Minutes after event begins",
-          description: "Number of minutes after an event begins that it should still be shown.",
+          description: "Number of minutes after an event begins that it should still be shown. Leave blank for an event to show for its duration.",
         }, 
         showAllDay: {
           val: false,
@@ -2228,6 +2281,11 @@ const weatherCal = {
           name: "Show overdue reminders",
           type: "bool",
         },
+		overdueColor: {
+			val: "ff3b30",
+			name: "Overdue Color",
+			description: "The hex code color value for overdue reminders. Leave blank for the default red.",
+		},
         todayOnly: {
           val: false,
           name: "Hide reminders due after today",
@@ -2350,17 +2408,17 @@ const weatherCal = {
         urlCurrent: {
           val: "",
           name: "URL to open when current weather is tapped",
-          description: "Optionally provide a URL to open when this item is tapped. Leave blank for the default.",
+          description: "Optionally provide a URL to open when this item is tapped. Leave blank for the weather app.",
         }, 
         urlFuture: {
           val: "",
           name: "URL to open when hourly weather is tapped",
-          description: "Optionally provide a URL to open when this item is tapped. Leave blank for the default.",
+          description: "Optionally provide a URL to open when this item is tapped. Leave blank for the weather app.",
         }, 
         urlForecast: {
           val: "",
           name: "URL to open when daily weather is tapped",
-          description: "Optionally provide a URL to open when this item is tapped. Leave blank for the default.",
+          description: "Optionally provide a URL to open when this item is tapped. Leave blank for the weather app.",
         }, 
       },
       covid: {
